@@ -22,31 +22,58 @@ class ELMo(torch.nn.Module):
 		self.vocabulary = vocabulary
 		self.vocabSize = len(vocabulary)
 		self.combineMode = combineMode
+		self.combineEmbeddings = None # takes a tuple of 3 embeddings and returns the final embedding
 
 		if combineMode == 'function':
-			self.combineEmbeddings = torch.nn.Linear(embeddingSize*3, embeddingSize)
+			self.combineFunction = torch.nn.Sequential(torch.nn.Linear(embeddingSize*3, embeddingSize), torch.nn.Tanh())
+			self.combineEmbeddings = lambda embeddings : self.combineFunction(torch.cat(embeddings, dim=2))
 		else:
 			self.embeddingWeights = torch.nn.Parameter(torch.randn(3, 1)) \
 									if combineMode == 'wsum' \
-									else torch.randn(3, 1) 
+									else torch.randn(3, 1)
 			self.combineEmbeddings = lambda embeddings : self.weightedSum(*embeddings)
-		
 
 		self.embeddings = torch.nn.Embedding(self.vocabSize, self.embeddingSize)
-		self.biLSTM1 = torch.nn.LSTM(input_size=embeddingSize,
+		self.biLM1 = torch.nn.LSTM(input_size=embeddingSize,
 							   		 hidden_size=embeddingSize,
 									 num_layers=1,
 									 bidirectional=True,
-									 batch_first=True)
-		self.biLSTM2 = torch.nn.LSTM(input_size=embeddingSize*2,
+									 batch_first=True,
+									 merge_mode='ave')
+		self.biLSTM2 = torch.nn.LSTM(input_size=embeddingSize,
 							   		 hidden_size=embeddingSize,
 									 num_layers=1,
 									 bidirectional=True,
-									 batch_first=True)
-	
+									 batch_first=True,
+									 merge_mode='ave')
+
 	def forward(self, input : torch.Tensor) -> torch.Tensor:
-		
-		pass
+		# get the embeddings
+		e1 = self.embeddings(input)
+
+		# get the output of the first LSTM
+		e2, _ = self.biLSTM1(e1)
+
+		# get the output of the second LSTM
+		e3, _ = self.biLSTM2(e2)
+		# e3, _ = self.biLSTM2((e2+e1) / 2) # residual connection
+
+		# combine the embeddings
+		return self.combineEmbeddings((e1, e2, e3))
 
 	def weightedSum(self, e1 : torch.Tensor, e2 : torch.Tensor, e3 : torch.Tensor) -> torch.Tensor:
 		return e1 * self.embeddingWeights[0] + e2 * self.embeddingWeights[1] + e3 * self.embeddingWeights[2]
+
+class ELMoClassifier(ELMo):
+	def __init__(self, *elmoParams, hiddenSizes : list[int], activation : Literal['tanh', 'relu', 'sigmoid']) -> None:
+		super().__init__(*elmoParams)
+
+		self.hiddenSizes = hiddenSizes
+		if activation == 'tanh':
+			self.activation = torch.nn.Tanh()
+		elif activation == 'relu':
+			self.activation = torch.nn.ReLU()
+		else:
+			self.activation = torch.nn.Sigmoid()
+
+		self.classifier = torch.nn.Sequential()
