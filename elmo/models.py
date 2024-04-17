@@ -1,9 +1,12 @@
 import torch
 import os
+import torch.utils
 from torch.utils.data import DataLoader
 from bidict import bidict
 from typing import Literal
+import torch.utils.data
 from tqdm import tqdm
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, classification_report
 
 from dataset import NewsClassificationDataset
 
@@ -29,7 +32,7 @@ class ELMo(torch.nn.Module):
 		super(ELMo, self).__init__()
 
 
-		self.__modelSavePath = os.path.join(MODEL_CHECKPOINTS_PATH, 'ELMo')
+		self._modelSavePath = os.path.join(MODEL_CHECKPOINTS_PATH, 'ELMo')
 		self._modelFileSuffix = f'_{embeddingSize}_{combineMode}_{len(trainDataset.vocabulary)}'
 
 		self.trainDataset = trainDataset
@@ -102,8 +105,8 @@ class ELMo(torch.nn.Module):
 	def weightedSum(self, e1 : torch.Tensor, e2 : torch.Tensor, e3 : torch.Tensor) -> torch.Tensor:
 		return e1 * self.embeddingWeights[0] + e2 * self.embeddingWeights[1] + e3 * self.embeddingWeights[2]
 
-	def preTrain(self, 
-			  	 batchSize : int = 16, learningRate : float = 0.001, 
+	def preTrain(self, batchSize : int = 16, 
+			     learningRate : float = 0.001, 
 				 epochs : int = 10, verbose : bool = True, 
 				 retrain : bool = False) -> None:
 		if not retrain and self.__loadModel__():
@@ -118,11 +121,16 @@ class ELMo(torch.nn.Module):
 			print("Commencing pretraining...")
 			
 		trainLoader = DataLoader(self.trainDataset, batchSize, shuffle=True, collate_fn=self.trainDataset._custom_collate_)
-		optimizer = torch.optim.Adam(self.parameters(), lr=learningRate)
-		criterion = torch.nn.CrossEntropyLoss(ignore_index=len(self.trainDataset.vocabulary)-1)
+
+		params = [ { 'params': self.biLM1.parameters() },
+				   { 'params': self.biLM2.parameters() },
+				   { 'params': self.embeddings.parameters() },
+				   { 'params': self.preTrainingClassifier.parameters() } ]
+		optimizer = torch.optim.Adam(params, lr=learningRate)
+		
+		criterion = torch.nn.CrossEntropyLoss(ignore_index=self.vocabulary['<PAD>'])
 
 		epochMetrics = {}
-
 		self.to(self.device)
 		for epoch in range(epochs):
 			runningLoss = 0
@@ -159,27 +167,23 @@ class ELMo(torch.nn.Module):
 		if not os.path.exists(MODEL_CHECKPOINTS_PATH):
 			os.mkdir(MODEL_CHECKPOINTS_PATH)
 
-		if not os.path.exists(self.__modelSavePath):
-			os.mkdir(self.__modelSavePath)
+		if not os.path.exists(self._modelSavePath):
+			os.mkdir(self._modelSavePath)
 		
-		torch.save(self.state_dict(), os.path.join(self.__modelSavePath, f'pretrained_model_{self._modelFileSuffix}.pt'))
+		torch.save(self.state_dict(), os.path.join(self._modelSavePath, f'pretrained_model_{self._modelFileSuffix}.pt'))
 
 	def __loadModel__(self) -> bool:
-		if not os.path.exists(os.path.join(self.__modelSavePath, f'pretrained_model_{self._modelFileSuffix}.pt')):
+		if not os.path.exists(os.path.join(self._modelSavePath, f'pretrained_model_{self._modelFileSuffix}.pt')):
 			return False
 		
-		self.load_state_dict(torch.load(os.path.join(self.__modelSavePath, f'pretrained_model_{self._modelFileSuffix}.pt')))
+		self.load_state_dict(torch.load(os.path.join(self._modelSavePath, f'pretrained_model_{self._modelFileSuffix}.pt')))
 		return True
 
 class ELMoClassifier(ELMo):
-	def __init__(self, *elmoParams,
-			  	 hiddenEmbeddingSize : int = 256, 
-				 numLayers : int = 1,
-			  	 hiddenSizes : list[int] = [64],
-				 activation : Literal['tanh', 'relu', 'sigmoid'] = 'tanh') -> None:
+	def __init__(self, *elmoParams, hiddenEmbeddingSize : int = 256, numLayers : int = 1, hiddenSizes : list[int] = [64], activation : Literal['tanh', 'relu', 'sigmoid'] = 'tanh') -> None:
 		super().__init__(*elmoParams)
 
-		self.__modelSavePath = os.path.join(MODEL_CHECKPOINTS_PATH, 'ELMo_classifier')
+		self._modelSavePath = os.path.join(MODEL_CHECKPOINTS_PATH, 'ELMo_classifier')
 		self._classifierModelFileSuffix = self._modelFileSuffix + f"_{hiddenEmbeddingSize}_{numLayers}_{hiddenSizes}_{activation}"
 
 		self.bidirectional = True
@@ -210,32 +214,42 @@ class ELMoClassifier(ELMo):
 				self.linearClassifier.add_module(f'activation{i}', self.activation)
 	
 	def classificationForward(self, X : torch.Tensor) -> torch.Tensor:
+		lengths = torch.sum(X != self.vocabulary['<PAD>'], dim=1).view(-1).to(torch.device('cpu'))
+
 		# get embeddings from ELMo
 		embeddings = self.forward(X)
+
+		# pack padded sequence
+		embeddings = torch.nn.utils.rnn.pack_padded_sequence(embeddings, lengths, batch_first=True, enforce_sorted=False)
 
 		# get output of LSTM
 		output, _ = self.lstm(embeddings)
 
 		# select the last hidden state
-		output = output[:, -1, :]
+		output, _ = torch.nn.utils.rnn.pad_packed_sequence(output, batch_first=True)
+		output = output[torch.arange(output.shape[0]), lengths-1, :]
+		# output = output[:, -1, :]
 
 		# get output of linear classifier
-		return self.linearClassifier(output)
+		output = self.linearClassifier(output)
 
-	def train(self, 
-			  batchSize : int = 16, learningRate : float = 0.001, 
-			  epochs : int = 10, verbose : bool = True, 
-			  retrain : bool = False) -> None:
+		return output
+
+	def train(self, batchSize : int = 16, learningRate : float = 0.001, epochs : int = 10, verbose : bool = True, retrain : bool = False, resumeFromCheckpoint : bool = False) -> None:
 		if not retrain and self.__loadClassifierModel__():
 			if verbose:
 				print('Model checkpoint loaded.')
-			return
+			if not resumeFromCheckpoint:
+				return
+			else:
+				if verbose:
+					print('Resuming from checkpoint.')
 		else:
 			if verbose:
 				print('Model checkpoint not found or retrain flag is set. Training from scratch.')
 
 		if verbose:
-			print("Training Classifier on sentence classification task...")
+			print("Training Classifier on sentence classification task.")
 
 		trainLoader = DataLoader(self.trainDataset, batchSize, shuffle=True, collate_fn=self.trainDataset._custom_collate_)
 		
@@ -245,12 +259,11 @@ class ELMoClassifier(ELMo):
 			params.append({ 'params': self.combineFunction.parameters() })
 		elif self.combineMode == 'wsum':
 			params.append({ 'params': self.embeddingWeights })
-		
-		epochMetrics = {}
-
 		optimizer = torch.optim.Adam(params, lr=learningRate)
+		
 		criterion = torch.nn.CrossEntropyLoss()
 
+		epochMetrics = {}
 		self.to(self.device)
 		for epoch in range(epochs):
 			runningLoss = 0
@@ -275,7 +288,7 @@ class ELMoClassifier(ELMo):
 			if verbose:
 				print(f'Epoch {epoch+1}/{epochs} | Loss: {epochMetrics[epoch]["train loss"]:.4f}')
 			
-			if (epoch+1) % 2 == 0:
+			if (epoch+1) % 5 == 0:
 				self.__saveClassifierModel__()
 				if verbose:
 					print(f'Epoch {epoch+1}/{epochs} | Model saved.')
@@ -285,6 +298,32 @@ class ELMoClassifier(ELMo):
 		Returns:
 			metrics: dict of metrics like accuracy, precision, recall, f1, classification report
 		"""
+		metrics = {}
+		
+		preds = torch.tensor([]).to(self.device)
+		testLoader = DataLoader(testDataset, 64, shuffle=False, collate_fn=testDataset._custom_collate_)
+		
+		self.to(self.device)
+		with torch.no_grad():
+			for X, y in tqdm(testLoader, desc='Classifier Evaluation', leave=True):
+				X = X.to(self.device)
+				y = y.to(self.device)
+
+				output = self.classificationForward(X)
+
+				predictions = torch.argmax(output, dim=1).view(-1)
+				preds = torch.cat((preds, predictions))
+		
+		# copy to cpu
+		preds = preds.cpu()
+
+		metrics['accuracy'] = accuracy_score(testDataset.labels, preds)
+		metrics['precision'] = precision_score(testDataset.labels, preds, average='macro', zero_division=0)
+		metrics['recall'] = recall_score(testDataset.labels, preds, average='macro', zero_division=0)
+		metrics['f1'] = f1_score(testDataset.labels, preds, average='macro', zero_division=0)
+		metrics['report'] = classification_report(testDataset.labels, preds, zero_division=0)
+
+		return metrics
 
 	def __saveClassifierModel__(self) -> None:
 		"""
@@ -293,17 +332,17 @@ class ELMoClassifier(ELMo):
 		if not os.path.exists(MODEL_CHECKPOINTS_PATH):
 			os.mkdir(MODEL_CHECKPOINTS_PATH)
 
-		if not os.path.exists(self.__modelSavePath):
-			os.mkdir(self.__modelSavePath)
+		if not os.path.exists(self._modelSavePath):
+			os.mkdir(self._modelSavePath)
 		
-		torch.save(self.state_dict(), os.path.join(self.__modelSavePath, f'classifier_model_{self._classifierModelFileSuffix}.pt'))
+		torch.save(self.state_dict(), os.path.join(self._modelSavePath, f'classifier_model_{self._classifierModelFileSuffix}.pt'))
 
 	def __loadClassifierModel__(self) -> bool:
-		if not os.path.exists(os.path.join(self.__modelSavePath, f'classifier_model_{self._classifierModelFileSuffix}.pt')):
+		if not os.path.exists(os.path.join(self._modelSavePath, f'classifier_model_{self._classifierModelFileSuffix}.pt')):
 			return False
 		
-		self.load_state_dict(torch.load(os.path.join(self.__modelSavePath, f'classifier_model_{self._classifierModelFileSuffix}.pt')))
-		return True\
+		self.load_state_dict(torch.load(os.path.join(self._modelSavePath, f'classifier_model_{self._classifierModelFileSuffix}.pt')))
+		return True
 
 if __name__ == '__main__':
 	device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -314,11 +353,26 @@ if __name__ == '__main__':
 	elmoClassifier = ELMoClassifier(256,
 								 	trainDataset,
 									'function',
-									device)
+									device,
+									hiddenEmbeddingSize=256,
+									numLayers=2,
+									hiddenSizes=[128, 64],
+									activation='tanh')
 	
 	elmoClassifier.preTrain(batchSize=8, 
 						 	learningRate=0.001, 
-							epochs=10, 
-							retrain=True)
+							epochs=8,
+							retrain=False)
 	elmoClassifier.train(batchSize=32,
-					  	 epochs=20)
+					  	 epochs=15,
+						 retrain=False)
+	
+	metrics = elmoClassifier.evaluate(trainDataset)
+	print("Train Report:")
+	print(metrics['report'])
+
+	testDataset = NewsClassificationDataset('../data/News Classification Dataset/test.csv', trueVocab=trainDataset.vocabulary)
+	testMetrics = elmoClassifier.evaluate(testDataset)
+	
+	print("\nTest Report:")
+	print(testMetrics['report'])

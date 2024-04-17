@@ -7,7 +7,7 @@ from torch.utils.data import Dataset
 from preprocessor import DatasetPreprocessor
 
 class NewsClassificationDataset(Dataset):
-	def __init__(self, datasetFilePath : str) -> None:
+	def __init__(self, datasetFilePath : str, trueVocab : bidict = None) -> None:
 		super().__init__()
 	
 		self.datasetFilePath = datasetFilePath
@@ -15,7 +15,7 @@ class NewsClassificationDataset(Dataset):
 
 		print('Processing dataset...')
 		startTime = time.time()
-		self.tokens, self.labels, self.vocabulary = self.preprocessor.processFile()
+		self.tokens, self.labels, self.vocabulary = self.preprocessor.processFile(trueVocab)
 		print(f'Processed dataset in {time.time() - startTime} seconds.')
 		self.classes = np.unique(self.labels)
 		self.numClasses = len(self.classes)
@@ -39,7 +39,7 @@ class NewsClassificationDataset(Dataset):
 		"""
 		tokens, labels = zip(*batch)
 
-		tokens = torch.nn.utils.rnn.pad_sequence(tokens, batch_first=True, padding_value=len(self.vocabulary)-1)
+		tokens = torch.nn.utils.rnn.pad_sequence(tokens, batch_first=True, padding_value=self.vocabulary['<PAD>'])
 		labels = torch.stack(labels)
 		
 		return tokens, labels
