@@ -28,8 +28,10 @@ class ELMo(torch.nn.Module):
 				- 'wsum': Take the weighted sum of embeddings using trainable weights.
 				- 'sum': Take the weighted sum of embeddings using fixed random weights.
 		"""
-		super(ELMo, self).__init__()
+		# ensure that embeddingSize is even
+		assert embeddingSize % 2 == 0
 
+		super(ELMo, self).__init__()
 
 		self._modelSavePath = os.path.join(MODEL_CHECKPOINTS_PATH, 'ELMo')
 		self._modelFileSuffix = f'_{embeddingSize}_{len(trainDataset.vocabulary)}'
