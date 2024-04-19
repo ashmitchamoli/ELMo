@@ -3,7 +3,7 @@ import torch
 from elmo.models import ELMoClassifier
 from elmo.dataset import NewsClassificationDataset
 
-trainDataset = NewsClassificationDataset('../data/News Classification Dataset/train.csv')
+trainDataset = NewsClassificationDataset('./data/News Classification Dataset/train.csv')
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 embeddingSize = int(input('Enter embedding size: '))
@@ -26,6 +26,8 @@ if not retrain:
 	resumeFromCheckpoint = input("Do you want to resume training from checkpoint? (y/n): ")
 	if resumeFromCheckpoint.lower() == 'y':
 		resumeFromCheckpoint = True
+	else:
+		resumeFromCheckpoint = False
 
 elmoClassifier = ELMoClassifier(embeddingSize, 				# embedding size
 								trainDataset,				# train dataset
@@ -41,3 +43,9 @@ elmoClassifier.train(batchSize=batchSize,
 					 learningRate=learningRate,
 					 retrain=retrain,
 					 resumeFromCheckpoint=resumeFromCheckpoint)
+
+testDataset = NewsClassificationDataset('./data/News Classification Dataset/test.csv', trueVocab=trainDataset.vocabulary)
+
+metrics = elmoClassifier.evaluate(testDataset)
+
+print(metrics['report'])

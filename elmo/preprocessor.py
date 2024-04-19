@@ -57,20 +57,15 @@ class DatasetPreprocessor:
 		vocabulary.add('<UNK>')
 		vocabulary.add('<PAD>')
 		self.vocabulary = bidict({ word : index for index, word in enumerate(vocabulary) }) 
-		
-		if trueVocab is None:
-			tokens = [ torch.tensor([ self.vocabulary.get(token, self.vocabulary['<UNK>']) for token in sentence ]) for sentence in tokens ]
-		else:
-			tokens = [ torch.tensor([ trueVocab.get(self.vocabulary.inverse[token.item()], trueVocab['<UNK>']) for token in sentence ]) for sentence in tokens ]
-		
-		labels = torch.tensor(labels)
-
-		self.tokens = tokens
-		self.labels = labels
+		self.tokens = [ torch.tensor([ self.vocabulary.get(token, self.vocabulary['<UNK>']) for token in sentence ]) for sentence in tokens ]
+		self.labels = torch.tensor(labels)
 
 		# save tokens, labels and vocabulary
 		self.__saveProcessedData__()
 		print(f"Processed data saved to {self._saveFileName}.")
+		
+		if trueVocab is not None:
+			self.tokens = [ torch.tensor([ trueVocab.get(token, trueVocab['<UNK>']) for token in sentence ]) for sentence in tokens ]
 
 		return self.tokens, self.labels, self.vocabulary if trueVocab is None else trueVocab
 

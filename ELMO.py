@@ -3,7 +3,7 @@ import torch
 from elmo.models import ELMo
 from elmo.dataset import NewsClassificationDataset
 
-trainDataset = NewsClassificationDataset('../data/News Classification Dataset/train.csv')
+trainDataset = NewsClassificationDataset('./data/News Classification Dataset/train.csv')
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 embeddingSize = int(input('Enter embedding size: '))
