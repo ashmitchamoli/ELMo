@@ -1,9 +1,10 @@
 import torch
 import os
 from torch.utils.data import DataLoader
+from itertools import chain
 from typing import Literal
 from tqdm import tqdm
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, classification_report
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, classification_report, confusion_matrix
 
 from dataset import NewsClassificationDataset
 
@@ -41,30 +42,40 @@ class ELMo(torch.nn.Module):
 		
 
 		self.embeddings = torch.nn.Embedding(self.vocabSize, embeddingSize)
-		self.biLM1 = torch.nn.LSTM(input_size=embeddingSize,
-								   hidden_size=embeddingSize//2,
-								   num_layers=1,
-								   bidirectional=True,
-								   batch_first=True)
-		self.biLM2 = torch.nn.LSTM(input_size=embeddingSize,
-							   	   hidden_size=embeddingSize//2,
-								   num_layers=1,
-								   bidirectional=True,
-								   batch_first=True)
+		# self.biLM1 = torch.nn.LSTM(input_size=embeddingSize,
+		# 						   hidden_size=embeddingSize//2,
+		# 						   num_layers=1,
+		# 						   bidirectional=True,
+		# 						   batch_first=True)
+		# self.biLM2 = torch.nn.LSTM(input_size=embeddingSize,
+		# 					   	   hidden_size=embeddingSize//2,
+		# 						   num_layers=1,
+		# 						   bidirectional=True,
+		# 						   batch_first=True)
+		lstmParams = {'hidden_size': embeddingSize//2,
+					  'num_layers': 1,
+					  'batch_first': True}
+		self.biLM1 = torch.nn.LSTM(input_size=embeddingSize, bidirectional=True, **lstmParams)
+		self.lstmForward2 = torch.nn.LSTM(input_size=embeddingSize//2, bidirectional=False, **lstmParams)
+		self.lstmBackward2 = torch.nn.LSTM(input_size=embeddingSize//2, bidirectional=False, **lstmParams)
+
 		self.preTrainingClassifier = torch.nn.Linear(embeddingSize, self.vocabSize)
 
 	def nextWordPredictionForward(self, X : torch.Tensor) -> torch.Tensor:
 		# get the embeddings
 		e1 = self.embeddings(X)
 		
-		# get the output of the first LSTM
+		# get the output of the first biLSTM
 		e2, _ = self.biLM1(e1)
 
-		# get the output of the second LSTM
-		e3, _ = self.biLM2(e2)
+		# get the output of the second forward LSTM
+		e3Forward, _ = self.lstmForward2(e2[:, :, :self.embeddingSize//2])
+		e3Backward, _ = self.lstmBackward2(e2[:, :, self.embeddingSize//2:].flip(1))
+		
+		e3 = torch.cat((e3Forward, e3Backward.flip(1)), dim=2)
 
 		# residual connection
-		e3 = (e3 + e2) / 2
+		# e3 = (e3 + e2) / 2
 
 		# prepare input
 		input = torch.cat((torch.cat((torch.zeros((e3.shape[0], 1, self.embeddingSize//2)).to(self.device),
@@ -79,7 +90,9 @@ class ELMo(torch.nn.Module):
 
 		return wordPredictions
 
-	def preTrain(self, batchSize : int = 16, 
+	def preTrain(self,
+			  	 devDataset : NewsClassificationDataset = None, 
+			  	 batchSize : int = 16, 
 			     learningRate : float = 0.001, 
 				 epochs : int = 10, verbose : bool = True, 
 				 retrain : bool = False,
@@ -102,7 +115,8 @@ class ELMo(torch.nn.Module):
 		trainLoader = DataLoader(self.trainDataset, batchSize, shuffle=True, collate_fn=self.trainDataset._custom_collate_)
 
 		params = [ { 'params': self.biLM1.parameters() },
-				   { 'params': self.biLM2.parameters() },
+				   { 'params': self.lstmForward2.parameters() },
+				   { 'params': self.lstmBackward2.parameters() },
 				   { 'params': self.embeddings.parameters() },
 				   { 'params': self.preTrainingClassifier.parameters() } ]
 		optimizer = torch.optim.Adam(params, lr=learningRate)
@@ -136,9 +150,18 @@ class ELMo(torch.nn.Module):
 
 			if (epoch+1) % 2 == 0:
 				self.__saveModel__()
+				# accuracy = self.evaluate(self.trainDataset)['accuracy']
 				if verbose:
 					print(f'Epoch {epoch+1}/{epochs}: Model checkpoint saved.')
-		
+			
+			devMetrics = self.evaluate(devDataset)
+			trainMetrics = self.evaluate(self.trainDataset)
+			epochMetrics[epoch]['dev metrics'] = devMetrics
+			epochMetrics[epoch]['train metrics'] = trainMetrics
+
+			if verbose:
+				print(f"Epoch {epoch+1}/{epochs} dev Accuracy {devMetrics['F1']:.4f} | train Accuracy {trainMetrics['F1']:.4f}")
+
 		self.__saveModel__()
 		if verbose:
 			print("Pretraining completed. Model weights saved\n")
@@ -164,7 +187,10 @@ class ELMo(torch.nn.Module):
 		return True
 	
 	def evaluate(self, testDataset : NewsClassificationDataset) -> dict:
-		testLoader = DataLoader(testDataset, 8, shuffle=False, collate_fn=testDataset._custom_collate_)
+		testLoader = DataLoader(testDataset, 32, shuffle=False, collate_fn=testDataset._custom_collate_)
+
+		preds = torch.tensor([]).to(self.device)
+		actual = torch.tensor([]).to(self.device)
 
 		epochMetrics = {}
 		self.to(self.device)
@@ -172,9 +198,19 @@ class ELMo(torch.nn.Module):
 			for X, y in tqdm(testLoader, desc='Evaluating', leave=True):
 				X = X.to(self.device)
 
-				predictions = self.classificationForward(X)
-				
-				epochMetrics['accuracy'] = accuracy_score(y.view(-1).cpu(), predictions.argmax(dim=1).view(-1).cpu())
+				predictions = self.nextWordPredictionForward(X).argmax(dim=1).view(-1)
+				# print(predictions.shape, X.view(-1).shape)
+
+				preds = torch.cat((preds, predictions))
+				actual = torch.cat((actual, X.view(-1)))
+		
+		preds = preds.cpu()
+		actual = actual.cpu()
+
+		epochMetrics['accuracy'] = accuracy_score(actual, preds)
+		epochMetrics['precision'] = precision_score(actual, preds, average='macro', zero_division=0)
+		epochMetrics['recall'] = recall_score(actual, preds, average='macro', zero_division=0)
+		epochMetrics['F1'] = f1_score(actual, preds, average='macro', zero_division=0)
 
 		return epochMetrics
 
@@ -203,12 +239,12 @@ class ELMoClassifier(torch.nn.Module):
 		self.combineEmbeddings = None # takes a tuple of 3 embeddings and returns the final embedding
 
 		if combineMode == 'function':
-			self.combineFunction = torch.nn.Sequential(torch.nn.Linear(self.embeddingSize*3, self.embeddingSize), torch.nn.Tanh())
+			self.combineFunction = torch.nn.Sequential(torch.nn.Linear(self.embeddingSize*3, self.embeddingSize))
 			self.combineEmbeddings = lambda embeddings : self.combineFunction(torch.cat(embeddings, dim=2))
 		else:
 			self.embeddingWeights = torch.nn.Parameter(torch.randn(3, 1)) \
 									if combineMode == 'wsum' \
-									else torch.randn(3, 1)
+									else torch.ones(size=(3, 1))
 			self.combineEmbeddings = lambda embeddings : self.weightedSum(*embeddings)
 
 		if activation == 'tanh':
@@ -241,12 +277,16 @@ class ELMoClassifier(torch.nn.Module):
 		e2, _ = self.ELMo.biLM1(e1)
 
 		# get the output of the second LSTM
-		e3, _ = self.ELMo.biLM2(e2)
-
+		e3Forward, _ = self.ELMo.lstmForward2(e2[:, :, :self.embeddingSize//2])
+		e3Backward, _ = self.ELMo.lstmBackward2(e2[:, :, self.embeddingSize//2:].flip(1))
+		
+		e3 = torch.cat((e3Forward, e3Backward.flip(1)), dim=2)
+		
 		# combine the embeddings
 		return self.combineEmbeddings((e1, e2, e3))
 
 	def classificationForward(self, X : torch.Tensor) -> torch.Tensor:
+		# find the lengths of each sentence
 		lengths = torch.sum(X != self.vocabulary['<PAD>'], dim=1).view(-1).to(torch.device('cpu'))
 
 		# get embeddings from ELMo
@@ -262,17 +302,20 @@ class ELMoClassifier(torch.nn.Module):
 		output, _ = torch.nn.utils.rnn.pad_packed_sequence(output, batch_first=True)
 		output = torch.cat((output[torch.arange(output.shape[0]), lengths-1, :self.hiddenEmbeddingSize],
 							output[torch.arange(output.shape[0]), 0, self.hiddenEmbeddingSize:]), dim=1)
-		# output = output[:, -1, :]
 
 		# get output of linear classifier
 		output = self.linearClassifier(output)
 
 		return output
 
-	def preTrainElmo(self, batchSize: int = 16, learningRate: float = 0.001, epochs: int = 10, verbose: bool = True, retrain: bool = False, resumeFromCheckpoint: bool = False):
-		self.ELMo.preTrain(batchSize=batchSize, learningRate=learningRate, epochs=epochs, verbose=verbose, retrain=retrain, resumeFromCheckpoint=resumeFromCheckpoint)
+	def preTrainElmo(self, devDataset : NewsClassificationDataset, batchSize: int = 16, learningRate: float = 0.001, epochs: int = 10, verbose: bool = True, retrain: bool = False, resumeFromCheckpoint: bool = False):
+		self.ELMo.preTrain(devDataset, batchSize=batchSize, learningRate=learningRate, epochs=epochs, verbose=verbose, retrain=retrain, resumeFromCheckpoint=resumeFromCheckpoint)
 
-	def train(self, batchSize : int = 16, learningRate : float = 0.001, epochs : int = 10, verbose : bool = True, retrain : bool = False, resumeFromCheckpoint : bool = False) -> None:
+	def train(self, devDataset : NewsClassificationDataset, batchSize : int = 16, learningRate : float = 0.001, epochs : int = 10, verbose : bool = True, retrain : bool = False, resumeFromCheckpoint : bool = False) -> None:
+		"""
+		Start training from scratch if retrain flag is set or model checkpoint is not found in the ./model_checkpoints/ELMo_classifier folder.
+		If the retrain flag is not set and model is loaded from checkpoint, resume training from this checkpoint if resumeFromCheckpoint flag is set, otherwise return.
+		"""
 		if not retrain and self.__loadClassifierModel__():
 			if verbose:
 				print('Model checkpoint loaded.')
@@ -326,17 +369,24 @@ class ELMoClassifier(torch.nn.Module):
 
 			if verbose:
 				print(f'Epoch {epoch+1}/{epochs} | Loss: {epochMetrics[epoch]["train loss"]:.4f}')
+	
+			devMetrics = self.evaluate(devDataset, verbose)
+			epochMetrics[epoch]['dev metrics'] = devMetrics
+
+			if verbose:
+				print(f'Epoch {epoch+1}/{epochs} Dev Metrics | Accuracy: {devMetrics["accuracy"]:.4f} | F1: {devMetrics["f1"]:.4f}')
 			
-			if (epoch+1) % 5 == 0:
+			if (epoch+1) % 2 == 0:
 				self.__saveClassifierModel__()
 				if verbose:
 					print(f'Epoch {epoch+1}/{epochs} | Model saved.')
+				
 
 		self.__saveClassifierModel__()
 		if verbose:
 			print('Classifier training complete. Model saved.\n')
 
-	def evaluate(self, testDataset : NewsClassificationDataset) -> dict:
+	def evaluate(self, testDataset : NewsClassificationDataset, verbose : bool = True) -> dict:
 		"""
 		Returns:
 			metrics: dict of metrics like accuracy, precision, recall, f1, classification report
@@ -350,7 +400,7 @@ class ELMoClassifier(torch.nn.Module):
 		if self.combineMode != 'function':
 			self.embeddingWeights = self.embeddingWeights.to(self.device)
 		with torch.no_grad():
-			for X, y in tqdm(testLoader, desc='Classifier Evaluation', leave=True):
+			for X, y in tqdm(testLoader, desc='Classifier Evaluation', leave=verbose):
 				X = X.to(self.device)
 				y = y.to(self.device)
 
@@ -367,6 +417,7 @@ class ELMoClassifier(torch.nn.Module):
 		metrics['recall'] = recall_score(testDataset.labels, preds, average='macro', zero_division=0)
 		metrics['f1'] = f1_score(testDataset.labels, preds, average='macro', zero_division=0)
 		metrics['report'] = classification_report(testDataset.labels, preds, zero_division=0)
+		metrics['confusion matrix'] = confusion_matrix(testDataset.labels, preds)
 
 		return metrics
 
@@ -402,7 +453,7 @@ if __name__ == '__main__':
 									hiddenEmbeddingSize=256,
 									numLayers=2,
 									hiddenSizes=[128, 64],
-									activation='tanh')
+									activation='relu')
 	 
 	elmoClassifier.preTrainElmo(batchSize=8, 
 						 		learningRate=0.001, 
@@ -411,7 +462,7 @@ if __name__ == '__main__':
 
 	elmoClassifier.train(batchSize=32,
 					  	 epochs=10,
-						 retrain=True,
+						 retrain=False,
 						 learningRate=0.005)
 	
 	metrics = elmoClassifier.evaluate(trainDataset)

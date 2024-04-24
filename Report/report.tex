@@ -1,0 +1,115 @@
+\documentclass[a4paper,9pt]{report}
+
+\usepackage{subfig}
+\usepackage{float}
+\usepackage[myheadings]{fullpage}
+\usepackage{fancyhdr}
+% \usepackage[T1]{fontenc}
+\usepackage[english]{babel}
+\usepackage{amsmath}
+\usepackage{bbold}
+
+\newcommand{\HRule}[1]{\rule{\linewidth}{#1}}
+
+\pagestyle{fancy}
+\fancyhf{}
+\setlength\headheight{15pt}
+\fancyhead[R]{Introduction to Natural Language Processing}
+
+\usepackage[english]{babel}
+\usepackage[letterpaper,top=2cm,bottom=2cm,left=3cm,right=3cm,marginparwidth=1.75cm]{geometry}
+
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage[colorlinks=true, allcolors=blue]{hyperref}
+
+\begin{document}
+
+\title{ \normalsize \textsc{\LARGE Embeddings from Language Mdels (ELMo)}
+		\\ [2.0cm]
+		\HRule{0.5pt} \\
+		\LARGE \textbf{\uppercase{Report}}
+		\HRule{2pt} \\ [0.5cm]
+		\normalsize \vspace*{3\baselineskip}}
+        \date{ }
+
+\author{Ashmit Chamoli\\ }
+
+\maketitle
+\section*{Introduction}
+This repository contains an implementation of ELMo architecture using PyTorch. Instructions to use the code have been provided in the README.
+
+
+\section*{Dataset}
+We use the \href{https://iiitaphyd-my.sharepoint.com/:u:/g/personal/advaith_malladi_research_iiit_ac_in/EWjgIboHC19Ppq6Of9klUo4BlKgAqynxC0TRBURzQ0lEzA?e=tWZqY5}{News Classification Dataset} which contains labeled news snippets. 
+First, we pre-train ELMo on this dataset and then we use these embeddings to train an LSTM classifier to classify the news snippets.
+
+\section*{Experiments}
+First we pre-train the ELMo architecture on the next word prediction task and run the model for 16 epochs with the following hyperparameters:
+\begin{table}[H]
+    \centering
+    \begin{tabular}{|l|l|}
+        \hline
+        \textbf{Embedding Size} \\ \hline
+        512 \\ \hline
+    \end{tabular}
+\end{table}
+
+We train 6 embedding models, 3 each for SVD and Word2Vec, varying context size from 2 to 4 with an embedding size of 300 and k=3 for Word2Vec.
+\\
+We use the same classifier for all the 6 set of embeddings with the following hyperparameters:
+\begin{table}[H]
+    \centering
+    \begin{tabular}{|l|l|l|l|l|}
+        \hline
+        \textbf{Hidden Size} & \textbf{Num Layers} & \textbf{Bidirectional} & \textbf{Hidden Layers} & \textbf{Activation} \\ \hline
+        256 & 3 & True & [128, 64] & tanh \\ \hline
+    \end{tabular}
+\end{table}
+It was observed during the classifier training that the model has difficulty learning with svd embeddings as they are very noise prone. For this reason, the SVD classifier was trained for a more epochs than its Word2Vec counterpart.
+
+\section*{Results}
+\subsection*{Word2Vec}
+Context size of 3 gives the best result for Word2Vec. 
+Context size of 2 comes close in terms of scores but both 2 and 3 are much better than context size 4.
+Table \ref{tab:word2vec} shows the scores for different context sizes.
+\begin{table}[H]
+    \centering
+    \begin{tabular}{|l|l|l|l|l|}
+        \hline
+        \textbf{Context Size} & \textbf{Accuracy} & \textbf{Precision} & \textbf{Recall} & \textbf{F1 Score} \\ \hline
+        2 & 0.906 & 0.906 & 0.906 & 0.905 \\
+        3 & \textbf{0.911} & \textbf{0.912} & \textbf{0.912} & \textbf{0.911} \\
+        4 & 0.862 & 0.875 & 0.861 & 0.861 \\
+        \hline
+    \end{tabular}
+    \caption{Context size of 3 performs the best in all metrics.}
+    \label{tab:word2vec}
+\end{table} 
+One possible reason for context size 4 performing worse than the other context sizes could be the addition of noise in the context for each word, i.e. words with no direct relation with the target word appear in its context. 
+Context size 3 performs better than context size 2 because of the additional information provided in the context without adding much noise. However, the performance upgrade is not substantial (0.5\%)
+
+Confusion matrices.
+\subsection*{SVD}
+Table \ref{tab:svd} shows the performance metrics for different context sizes. 
+\begin{table}[H]
+    \centering
+    \begin{tabular}{|l|l|l|l|l|}
+        \hline
+        \textbf{Context Size} & \textbf{Accuracy} & \textbf{Precision} & \textbf{Recall} & \textbf{F1 Score} \\ \hline
+        2 & 0.868 & 0.870 & 0.867 & 0.867 \\
+        3 & 0.873 & 0.876 & 0.870 & 0.873 \\
+        4 & \textbf{0.882} & \textbf{0.885} & \textbf{0.878} & \textbf{0.881} \\
+        \hline
+    \end{tabular}
+    \caption{Context size of 4 performs the best in all metrics.}
+    \label{tab:svd}
+\end{table}
+For SVD, context size of 4 performs the best. The expectation is that the performance will increase more as the context size is increased further and then start decreasing.
+
+\section*{Conclusion}
+We observe that Word2Vec embeddings achieve better performance than SVD embeddings. 
+However, word2vec is computationally much mroe expensive and takes more time to train. 
+Another advantage with SVD embeddings is that the time complexity does not increase much with the context size, which enables us to use relatively higher context sizes
+There is a trade off between accuracy and training time when choosing between SVD and Word2Vec and the choice of model hugely depends on the task at hand as well.
+\end{document}

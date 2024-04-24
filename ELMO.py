@@ -4,6 +4,7 @@ from elmo.models import ELMo
 from elmo.dataset import NewsClassificationDataset
 
 trainDataset = NewsClassificationDataset('./data/News Classification Dataset/train.csv')
+testDataset = NewsClassificationDataset('./data/News Classification Dataset/test.csv', trueVocab=trainDataset.vocabulary)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 embeddingSize = int(input('Enter embedding size: '))
@@ -26,7 +27,8 @@ elmoModel = ELMo(embeddingSize=embeddingSize,
 				 trainDataset=trainDataset,
 				 device=device)
 
-elmoModel.preTrain(batchSize=batchSize,
+elmoModel.preTrain(devDataset=testDataset,
+				   batchSize=batchSize,
 				   learningRate=learningRate,
 				   epochs=epochs,
 				   retrain=retrain,

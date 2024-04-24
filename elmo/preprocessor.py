@@ -66,6 +66,7 @@ class DatasetPreprocessor:
 		
 		if trueVocab is not None:
 			self.tokens = [ torch.tensor([ trueVocab.get(token, trueVocab['<UNK>']) for token in sentence ]) for sentence in tokens ]
+			self.vocabulary = trueVocab
 
 		return self.tokens, self.labels, self.vocabulary if trueVocab is None else trueVocab
 
